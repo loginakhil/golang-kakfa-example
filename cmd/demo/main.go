@@ -7,12 +7,14 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"kafka-utils/protos/gen/protos/cpu"
+	"kafka-utils/protos/gen/protos/ecommerce"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sr"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -49,8 +51,11 @@ func main() {
 	maybeDie(err, "failed to connect to schema registry")
 	fmt.Printf("reusing schema subject %q version %d id %d\n", ss.Subject, ss.Version, ss.ID)
 
+	ssEcom, err := rcl.SchemaByVersion(ctx, "protos.ecommerce", latestVersion, false)
+	maybeDie(err, "failed to connect to schema registry")
+	fmt.Printf("reusing schema subject %q version %d id %d\n", ss.Subject, ssEcom.Version, ss.ID)
+
 	// Setup our serializer / deserializer.
-	maybeDie(err, "unable to parse avro schema: %v", err)
 	var serde sr.Serde
 	serde.Register(
 		ss.ID,
@@ -94,6 +99,26 @@ func main() {
 		sr.Index(1),
 	)
 
+	serde.Register(
+		ssEcom.ID,
+		&ecommerce.Event{},
+		sr.EncodeFn(func(v interface{}) ([]byte, error) {
+			fmt.Println("calling encode")
+			s, err := proto.Marshal(v.(*ecommerce.Event))
+			if err != nil {
+				fmt.Println("encoding error")
+			}
+			fmt.Println("Marshalling done")
+			return s, nil
+		}),
+		sr.DecodeFn(func(b []byte, v interface{}) error {
+			return proto.Unmarshal(b, v.(*ecommerce.Event))
+		}),
+		sr.GenerateFn(func() any {
+			return new(ecommerce.Event)
+		}),
+	)
+
 	// Loop producing & consuming.
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(strings.Split(*seedBrokers, ",")...),
@@ -101,7 +126,7 @@ func main() {
 		kgo.ConsumeTopics(*topic),
 		kgo.DialTimeout(time.Second*3),
 		kgo.RetryTimeout(time.Second),
-		//kgo.RequiredAcks(kgo.AllISRAcks()),
+		kgo.RequiredAcks(kgo.AllISRAcks()),
 		//kgo.DisableAutoCommit(),
 	)
 
@@ -142,6 +167,44 @@ func main() {
 						Name:   fmt.Sprintf("RAM-%d", time.Now().Unix()),
 						MinGhz: 3,
 						MaxGhz: 4,
+					}),
+			},
+			func(r *kgo.Record, err error) {
+				maybeDie(err, "unable to produce: %v", err)
+				fmt.Printf("Produced simple record, value bytes: %x\n", r.Value)
+			},
+		)
+
+		cl.Produce(
+			context.Background(),
+			&kgo.Record{
+				Value: serde.MustEncode(
+					&ecommerce.Event{
+						OneofType: &ecommerce.Event_Customer{
+							Customer: &ecommerce.Customer{
+								CustomerId:   time.Now().Unix(),
+								CustomerName: fmt.Sprintf("AKHIL-%d", time.Now().Unix()),
+							},
+						},
+					}),
+			},
+			func(r *kgo.Record, err error) {
+				maybeDie(err, "unable to produce: %v", err)
+				fmt.Printf("Produced simple record, value bytes: %x\n", r.Value)
+			},
+		)
+
+		cl.Produce(
+			context.Background(),
+			&kgo.Record{
+				Value: serde.MustEncode(
+					&ecommerce.Event{
+						OneofType: &ecommerce.Event_Order{
+							Order: &ecommerce.Order{
+								OrderId:   time.Now().Unix(),
+								CreatedAt: timestamppb.Now(),
+							},
+						},
 					}),
 			},
 			func(r *kgo.Record, err error) {
